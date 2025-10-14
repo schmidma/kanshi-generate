@@ -31,17 +31,13 @@ impl WlrStatus {
 #[derive(Debug, Deserialize)]
 struct Output {
     name: String,
-    description: String,
     make: String,
     model: String,
     serial: Option<String>,
-    physical_size: Size,
     enabled: bool,
     modes: Vec<Mode>,
     position: Position,
-    transform: String,
     scale: f32,
-    adaptive_sync: bool,
 }
 
 impl Output {
@@ -73,12 +69,6 @@ impl Output {
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct Size {
-    width: u32,
-    height: u32,
 }
 
 #[derive(Debug, Deserialize)]
