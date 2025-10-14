@@ -1,5 +1,7 @@
 # kanshi-generate
 
+[![CI](https://github.com/schmidma/kanshi-generate/actions/workflows/ci.yml/badge.svg)](https://github.com/schmidma/kanshi-generate/actions)
+
 A small CLI tool that converts the output of [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) into a [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile configuration.
 
 ## Usage
