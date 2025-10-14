@@ -1,0 +1,131 @@
+name: CI & Nightly Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  RUSTFLAGS: "-Dwarnings"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: clippy,rustfmt
+
+      - name: Build the crate
+        run: cargo build
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  build-release:
+    needs: build-and-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          # - os: ubuntu-latest
+          #   target: aarch64-unknown-linux-gnu
+          # - os: ubuntu-latest
+          #   target: x86_64-unknown-linux-musl
+          # - os: ubuntu-latest
+          #   target: aarch64-unknown-linux-musl
+          # - os: macos-latest
+          #   target: x86_64-apple-darwin
+          # - os: macos-latest
+          #   target: aarch64-apple-darwin
+          #- os: windows-2022
+          #  target: x86_64-pc-windows-msvc
+          #- os: windows-2022
+          #  target: aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install musl-tools
+        if: endsWith(matrix.target, 'musl')
+        run: sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          target: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifact
+        id: make-artifact
+        run: |
+          mkdir -p release
+          ASSET_NAME="kanshi-generate-${{ matrix.target }}.tar.gz"
+          tar -czf "release/${ASSET_NAME}" -C "target/${{ matrix.target }}/release" kanshi-generate
+          echo "asset_name=${ASSET_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Create checksum
+        id: make-checksum
+        run: |
+          CHECKSUM_NAME="kanshi-generate-${{ matrix.target }}.sha256sum"
+          sha256sum "target/${{ matrix.target }}/release/kanshi-generate" > "release/${CHECKSUM_NAME}"
+          echo "checksum_name=${CHECKSUM_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact for release
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release/*
+
+  nightly-release:
+    needs: build-release
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install GitHub CLI
+        run: |
+          sudo apt update
+          sudo apt install -y gh
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release
+
+      - name: Set nightly release info
+        run: |
+          TAG_NAME=nightly
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_ENV
+          echo "SUBJECT=kanshi-generate nightly build (prerelease)" >> $GITHUB_ENV
+          echo "PRERELEASE=--prerelease" >> $GITHUB_ENV
+          # Delete old nightly release/tag if exists
+          gh release delete $TAG_NAME --yes || true
+          git push origin :$TAG_NAME || true
+
+      - name: Publish nightly release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create $TAG_NAME $PRERELEASE --title "$SUBJECT" --notes "Automated nightly build" release/*
