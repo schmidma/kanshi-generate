@@ -2,6 +2,15 @@
 name = "kanshi-generate"
 version = "0.1.0"
 edition = "2024"
+authors = ["Maximilian Schmidt <maximilian@schmidt.so>"]
+description = "A small CLI tool that converts `wlr-randr` output into kanshi profile configuration."
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/schmidma/kanshi-generate"
+keywords = ["wayland", "sway", "kanshi", "wlr-randr", "display"]
+categories = ["command-line-utilities", "configuration", "wayland"]
+homepage = "https://github.com/schmidma/kanshi-generate"
+documentation = "https://github.com/schmidma/kanshi-generate#readme"
 
 [dependencies]
 clap = { version = "4.5.49", features = ["derive"] }

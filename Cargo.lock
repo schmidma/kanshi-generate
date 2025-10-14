@@ -202,6 +202,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
+name = "kanshi-generate"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "color-eyre",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -277,16 +287,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce25767e7b499d1b604768e7cde645d14cc8584231ea6b295e9c9eb22c02e1d1"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "randr-to-kanshi"
-version = "0.1.0"
-dependencies = [
- "clap",
- "color-eyre",
- "serde",
- "serde_json",
 ]
 
 [[package]]
