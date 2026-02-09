@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Maximilian Schmidt <maximilian@schmidt.so>"]
-description = "A small CLI tool that converts `wlr-randr` output into kanshi profile configuration."
+description = "A small CLI tool that converts Wayland output-management state into kanshi profile configuration."
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/schmidma/kanshi-generate"
-keywords = ["wayland", "sway", "kanshi", "wlr-randr", "display"]
+keywords = ["wayland", "sway", "kanshi", "wlr-output-management", "display"]
 categories = ["command-line-utilities", "configuration", "wayland"]
 homepage = "https://github.com/schmidma/kanshi-generate"
 documentation = "https://github.com/schmidma/kanshi-generate#readme"
@@ -19,6 +19,8 @@ color-eyre = "0.6.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
+wayland-client = "0.31.11"
+wayland-protocols-wlr = { version = "0.3.9", features = ["client"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"

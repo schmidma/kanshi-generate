@@ -1,35 +1,30 @@
 use std::{
+    collections::HashMap,
     fmt::Write as _,
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use serde::Deserialize;
 use thiserror::Error;
+use wayland_client::{
+    Connection, Dispatch, Proxy, QueueHandle,
+    backend::ObjectId,
+    globals::{BindError, GlobalListContents, registry_queue_init},
+    protocol::{wl_callback, wl_registry},
+};
+use wayland_protocols_wlr::output_management::v1::client::{
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::{self, ZwlrOutputModeV1},
+};
 
-const WLR_RANDR_BINARY: &str = "wlr-randr";
-const WLR_RANDR_ARGS: [&str; 1] = ["--json"];
 const PROFILE_KEYWORD: &[u8] = b"profile";
 
 #[derive(Debug, Error)]
 pub enum GenerateError {
-    #[error("failed to execute `{command}`")]
-    SpawnCommand {
-        command: String,
-        #[source]
-        source: std::io::Error,
-    },
-    #[error("`{command}` exited unsuccessfully ({status}): {stderr}")]
-    CommandFailed {
-        command: String,
-        status: String,
-        stderr: String,
-    },
-    #[error("`{command}` returned empty stdout")]
-    EmptyCommandOutput { command: String },
-    #[error("failed to parse wlr-randr output JSON")]
+    #[error("failed to parse input output JSON")]
     ParseJson(#[source] serde_json::Error),
     #[error("profile name cannot be empty")]
     EmptyProfileName,
@@ -59,14 +54,24 @@ pub enum GenerateError {
     ConfigParse { details: String },
     #[error("found duplicate profile `{profile_name}` in kanshi config ({count} blocks)")]
     DuplicateProfileName { profile_name: String, count: usize },
+    #[error("failed to connect to Wayland compositor: {details}")]
+    WaylandConnect { details: String },
+    #[error(
+        "compositor does not support zwlr_output_manager_v1 (wlr-output-management-unstable-v1)"
+    )]
+    WaylandProtocolUnsupported,
+    #[error("failed to communicate with Wayland output-management protocol: {details}")]
+    WaylandProtocolError { details: String },
+    #[error("timed out waiting for initial output-management state sync")]
+    WaylandSyncTimeout,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(transparent)]
-struct WlrStatus(Vec<Output>);
+struct WlrStatus(Vec<OutputSnapshot>);
 
-#[derive(Debug, Deserialize)]
-struct Output {
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputSnapshot {
     name: String,
     #[serde(default)]
     make: String,
@@ -75,12 +80,12 @@ struct Output {
     serial: Option<String>,
     enabled: bool,
     #[serde(default)]
-    modes: Vec<Mode>,
-    position: Option<Position>,
+    modes: Vec<ModeSnapshot>,
+    position: Option<PositionSnapshot>,
     scale: Option<f64>,
 }
 
-impl Output {
+impl OutputSnapshot {
     fn identifier(&self) -> String {
         let mut segments = Vec::with_capacity(3);
         if !self.make.trim().is_empty() {
@@ -102,7 +107,7 @@ impl Output {
         }
     }
 
-    fn active_mode(&self) -> Option<&Mode> {
+    fn active_mode(&self) -> Option<&ModeSnapshot> {
         self.modes
             .iter()
             .find(|mode| mode.current)
@@ -110,8 +115,8 @@ impl Output {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct Mode {
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModeSnapshot {
     width: u32,
     height: u32,
     refresh: f64,
@@ -119,8 +124,8 @@ struct Mode {
     current: bool,
 }
 
-#[derive(Debug, Deserialize)]
-struct Position {
+#[derive(Debug, Clone, Deserialize)]
+pub struct PositionSnapshot {
     x: i32,
     y: i32,
 }
@@ -132,47 +137,235 @@ struct ProfileBlock {
     end: usize,
 }
 
-pub fn capture_wlr_randr_json() -> Result<Vec<u8>, GenerateError> {
-    let command = format!("{WLR_RANDR_BINARY} {}", WLR_RANDR_ARGS.join(" "));
-    let output = Command::new(WLR_RANDR_BINARY)
-        .args(WLR_RANDR_ARGS)
-        .output()
-        .map_err(|source| GenerateError::SpawnCommand {
-            command: command.clone(),
-            source,
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        return Err(GenerateError::CommandFailed {
-            command,
-            status: output.status.to_string(),
-            stderr: if stderr.is_empty() {
-                String::from("<no stderr>")
-            } else {
-                stderr
-            },
-        });
-    }
-
-    if output.stdout.is_empty() {
-        return Err(GenerateError::EmptyCommandOutput { command });
-    }
-
-    Ok(output.stdout)
+#[derive(Debug, Default)]
+struct WaylandState {
+    done_received: bool,
+    finished: bool,
+    heads: HashMap<ObjectId, WaylandHeadState>,
+    modes: HashMap<ObjectId, WaylandModeState>,
 }
 
-pub fn generate_profile_from_slice(
+#[derive(Debug, Default)]
+struct WaylandHeadState {
+    name: Option<String>,
+    make: Option<String>,
+    model: Option<String>,
+    serial: Option<String>,
+    enabled: Option<bool>,
+    current_mode: Option<ObjectId>,
+    position: Option<PositionSnapshot>,
+    scale: Option<f64>,
+    mode_ids: Vec<ObjectId>,
+}
+
+#[derive(Debug, Default)]
+struct WaylandModeState {
+    width: Option<i32>,
+    height: Option<i32>,
+    refresh_mhz: Option<i32>,
+    preferred: bool,
+}
+
+impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &wl_registry::WlRegistry,
+        _: wl_registry::Event,
+        _: &GlobalListContents,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwlrOutputManagerV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrOutputManagerV1,
+        event: zwlr_output_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_output_manager_v1::Event::Head { head } => {
+                state.heads.entry(head.id()).or_default();
+            }
+            zwlr_output_manager_v1::Event::Done { .. } => {
+                state.done_received = true;
+            }
+            zwlr_output_manager_v1::Event::Finished => {
+                state.finished = true;
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(WaylandState, ZwlrOutputManagerV1, [
+        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrOutputHeadV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        head: &ZwlrOutputHeadV1,
+        event: zwlr_output_head_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let head_state = state.heads.entry(head.id()).or_default();
+
+        match event {
+            zwlr_output_head_v1::Event::Name { name } => {
+                head_state.name = Some(name);
+            }
+            zwlr_output_head_v1::Event::Make { make } => {
+                head_state.make = Some(make);
+            }
+            zwlr_output_head_v1::Event::Model { model } => {
+                head_state.model = Some(model);
+            }
+            zwlr_output_head_v1::Event::SerialNumber { serial_number } => {
+                head_state.serial = Some(serial_number);
+            }
+            zwlr_output_head_v1::Event::Enabled { enabled } => {
+                head_state.enabled = Some(enabled != 0);
+            }
+            zwlr_output_head_v1::Event::Mode { mode } => {
+                let mode_id = mode.id();
+                state.modes.entry(mode_id.clone()).or_default();
+                if !head_state.mode_ids.contains(&mode_id) {
+                    head_state.mode_ids.push(mode_id);
+                }
+            }
+            zwlr_output_head_v1::Event::CurrentMode { mode } => {
+                head_state.current_mode = Some(mode.id());
+            }
+            zwlr_output_head_v1::Event::Position { x, y } => {
+                head_state.position = Some(PositionSnapshot { x, y });
+            }
+            zwlr_output_head_v1::Event::Scale { scale } => {
+                head_state.scale = Some(scale);
+            }
+            zwlr_output_head_v1::Event::Finished => {
+                state.heads.remove(&head.id());
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(WaylandState, ZwlrOutputHeadV1, [
+        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ())
+    ]);
+}
+
+impl Dispatch<ZwlrOutputModeV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        mode: &ZwlrOutputModeV1,
+        event: zwlr_output_mode_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let mode_state = state.modes.entry(mode.id()).or_default();
+        match event {
+            zwlr_output_mode_v1::Event::Size { width, height } => {
+                mode_state.width = Some(width);
+                mode_state.height = Some(height);
+            }
+            zwlr_output_mode_v1::Event::Refresh { refresh } => {
+                mode_state.refresh_mhz = Some(refresh);
+            }
+            zwlr_output_mode_v1::Event::Preferred => {
+                mode_state.preferred = true;
+            }
+            zwlr_output_mode_v1::Event::Finished => {
+                state.modes.remove(&mode.id());
+            }
+            _ => {}
+        }
+    }
+}
+
+pub fn collect_outputs_wayland() -> Result<Vec<OutputSnapshot>, GenerateError> {
+    let connection =
+        Connection::connect_to_env().map_err(|source| GenerateError::WaylandConnect {
+            details: source.to_string(),
+        })?;
+
+    let (globals, mut event_queue) =
+        registry_queue_init::<WaylandState>(&connection).map_err(|source| {
+            GenerateError::WaylandProtocolError {
+                details: source.to_string(),
+            }
+        })?;
+    let qh = event_queue.handle();
+
+    let manager = globals
+        .bind::<ZwlrOutputManagerV1, _, _>(&qh, 1..=4, ())
+        .map_err(map_bind_error)?;
+
+    let mut state = WaylandState::default();
+    let mut synced = false;
+    for _ in 0..3 {
+        event_queue.roundtrip(&mut state).map_err(|source| {
+            GenerateError::WaylandProtocolError {
+                details: source.to_string(),
+            }
+        })?;
+
+        if state.done_received || state.finished {
+            synced = true;
+            break;
+        }
+    }
+
+    manager.stop();
+
+    if !synced {
+        return Err(GenerateError::WaylandSyncTimeout);
+    }
+
+    build_output_snapshots(&state)
+}
+
+pub fn collect_outputs_from_json(raw_json: &[u8]) -> Result<Vec<OutputSnapshot>, GenerateError> {
+    let status: WlrStatus = serde_json::from_slice(raw_json).map_err(GenerateError::ParseJson)?;
+    Ok(status.0)
+}
+
+pub fn generate_profile_from_outputs(
     profile_name: &str,
-    wlr_randr_json: &[u8],
+    outputs: &[OutputSnapshot],
 ) -> Result<String, GenerateError> {
     if profile_name.trim().is_empty() {
         return Err(GenerateError::EmptyProfileName);
     }
 
-    let status: WlrStatus =
-        serde_json::from_slice(wlr_randr_json).map_err(GenerateError::ParseJson)?;
-    render_profile(profile_name, &status.0)
+    render_profile(profile_name, outputs)
+}
+
+pub fn generate_profile_from_slice(
+    profile_name: &str,
+    raw_json: &[u8],
+) -> Result<String, GenerateError> {
+    let outputs = collect_outputs_from_json(raw_json)?;
+    generate_profile_from_outputs(profile_name, &outputs)
 }
 
 pub fn resolve_default_kanshi_config_path() -> Result<PathBuf, GenerateError> {
@@ -267,6 +460,84 @@ pub fn upsert_profile_in_file(
 
     let merged = upsert_profile_in_config(&existing, profile_name, new_profile_block)?;
     write_atomic(&target_path, &merged)
+}
+
+fn map_bind_error(error: BindError) -> GenerateError {
+    match error {
+        BindError::NotPresent | BindError::UnsupportedVersion => {
+            GenerateError::WaylandProtocolUnsupported
+        }
+    }
+}
+
+fn build_output_snapshots(state: &WaylandState) -> Result<Vec<OutputSnapshot>, GenerateError> {
+    let mut outputs = Vec::with_capacity(state.heads.len());
+
+    for head_state in state.heads.values() {
+        let output_name = head_state
+            .name
+            .clone()
+            .unwrap_or_else(|| String::from("<unknown>"));
+
+        let mut modes = Vec::new();
+        for mode_id in &head_state.mode_ids {
+            let Some(mode_state) = state.modes.get(mode_id) else {
+                continue;
+            };
+
+            let width = mode_state
+                .width
+                .ok_or_else(|| GenerateError::WaylandProtocolError {
+                    details: format!("mode for output `{output_name}` missing width"),
+                })
+                .and_then(|value| {
+                    u32::try_from(value).map_err(|_| GenerateError::WaylandProtocolError {
+                        details: format!("mode for output `{output_name}` has negative width"),
+                    })
+                })?;
+            let height = mode_state
+                .height
+                .ok_or_else(|| GenerateError::WaylandProtocolError {
+                    details: format!("mode for output `{output_name}` missing height"),
+                })
+                .and_then(|value| {
+                    u32::try_from(value).map_err(|_| GenerateError::WaylandProtocolError {
+                        details: format!("mode for output `{output_name}` has negative height"),
+                    })
+                })?;
+            let refresh =
+                mode_state
+                    .refresh_mhz
+                    .ok_or_else(|| GenerateError::WaylandProtocolError {
+                        details: format!("mode for output `{output_name}` missing refresh rate"),
+                    })?;
+
+            modes.push(ModeSnapshot {
+                width,
+                height,
+                refresh: f64::from(refresh) / 1000.0,
+                preferred: mode_state.preferred,
+                current: head_state.current_mode.as_ref() == Some(mode_id),
+            });
+        }
+
+        let output = OutputSnapshot {
+            name: output_name,
+            make: head_state.make.clone().unwrap_or_default(),
+            model: head_state.model.clone().unwrap_or_default(),
+            serial: head_state.serial.clone(),
+            enabled: head_state.enabled.unwrap_or(false),
+            modes,
+            position: head_state.position.clone(),
+            scale: head_state.scale,
+        };
+
+        outputs.push(output);
+    }
+
+    outputs.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+
+    Ok(outputs)
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), GenerateError> {
@@ -581,7 +852,7 @@ fn is_identifier_char(ch: u8) -> bool {
     ch.is_ascii_alphanumeric() || ch == b'_' || ch == b'-'
 }
 
-fn render_profile(profile_name: &str, outputs: &[Output]) -> Result<String, GenerateError> {
+fn render_profile(profile_name: &str, outputs: &[OutputSnapshot]) -> Result<String, GenerateError> {
     let mut profile = String::with_capacity(32 + outputs.len() * 128);
     writeln!(&mut profile, "profile {profile_name} {{").map_err(|_| GenerateError::Format)?;
 
@@ -636,8 +907,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        GenerateError, generate_profile_from_slice, resolve_default_kanshi_config_path,
-        upsert_profile_in_config,
+        GenerateError, collect_outputs_from_json, generate_profile_from_slice,
+        resolve_default_kanshi_config_path, upsert_profile_in_config,
     };
 
     #[test]
@@ -646,6 +917,13 @@ mod tests {
         let expected = include_str!("../tests/fixtures/mixed_outputs.kanshi");
         let rendered = generate_profile_from_slice("docked", json.as_bytes()).unwrap();
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn json_collection_parses_fixture() {
+        let json = include_str!("../tests/fixtures/mixed_outputs.json");
+        let outputs = collect_outputs_from_json(json.as_bytes()).unwrap();
+        assert_eq!(outputs.len(), 3);
     }
 
     #[test]

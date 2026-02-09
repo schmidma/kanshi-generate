@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/schmidma/kanshi-generate/actions/workflows/ci.yml/badge.svg)](https://github.com/schmidma/kanshi-generate/actions)
 
-A small CLI tool that converts the output of [`wlr-randr`](https://gitlab.freedesktop.org/emersion/wlr-randr) into a [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile configuration.
+A small CLI tool that converts live Wayland output-management state (`zwlr_output_manager_v1`) into a [kanshi](https://gitlab.freedesktop.org/emersion/kanshi) profile configuration.
 
 ## Usage
 
@@ -32,7 +32,7 @@ Arguments:
 Options:
       --config <PATH>      Override kanshi config path for in-place profile upsert
       --stdout             Print generated profile to stdout (raw mode, no config parsing/upsert)
-      --input-json <PATH>  Read JSON from a file path or '-' for stdin instead of calling wlr-randr
+      --input-json <PATH>  Read JSON from a file path or '-' for stdin instead of querying Wayland output-management protocol
       --output <PATH>      Write generated profile to file (raw mode, no config parsing/upsert)
   -h, --help               Print help
   -V, --version            Print version
@@ -51,11 +51,10 @@ kanshi-generate docked --config ~/.config/kanshi/config
 kanshi-generate docked --stdout
 
 # Use previously captured JSON
-wlr-randr --json > outputs.json
 kanshi-generate docked --input-json outputs.json
 
 # Pipe JSON over stdin
-wlr-randr --json | kanshi-generate docked --input-json -
+cat outputs.json | kanshi-generate docked --input-json -
 
 # Write generated profile directly to a file (no config parse/merge)
 kanshi-generate docked --output ~/.config/kanshi/generated-profile.conf
@@ -69,7 +68,9 @@ cargo install --git https://github.com/schmidma/kanshi-generate --locked
 
 ## Troubleshooting
 
-- If `wlr-randr` cannot reach your compositor, the command now exits with the original stderr from `wlr-randr`.
+- Live mode requires compositor support for `wlr-output-management-unstable-v1` (`zwlr_output_manager_v1`).
+- If the compositor socket cannot be reached, the command exits with a clear Wayland connection error.
+- If the compositor does not support output-management protocol, the command exits with an explicit unsupported-protocol error.
 - If a monitor is enabled but missing mode/position/scale data, the command fails fast with an explicit output-specific error.
 - Disabled outputs may not include `position`/`scale` in JSON; this is handled automatically.
 - If your config contains duplicate profile names, the command fails to avoid ambiguous overwrites.

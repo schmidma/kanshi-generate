@@ -21,59 +21,13 @@ fn binary_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_kanshi-generate"))
 }
 
-fn setup_fake_wlr_randr() -> TempDir {
-    let temp_dir = TempDir::new().unwrap();
-    let script_path = temp_dir.path().join("wlr-randr");
-    let script = r#"#!/usr/bin/env bash
-set -euo pipefail
-
-case "${WLR_RANDR_BEHAVIOR:-ok}" in
-  ok)
-    cat "${WLR_RANDR_FIXTURE}"
-    ;;
-  fail)
-    echo "failed to connect to display" >&2
-    exit 1
-    ;;
-  invalid)
-    printf '{invalid json'
-    ;;
-  empty)
-    exit 0
-    ;;
-  *)
-    echo "unknown test behavior" >&2
-    exit 2
-    ;;
-esac
-"#;
-    fs::write(&script_path, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let permissions = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&script_path, permissions).unwrap();
-    }
-    temp_dir
-}
-
-fn run_with_fake_wlr_randr(
-    args: &[&str],
-    behavior: &str,
-    configure: impl FnOnce(&mut Command),
-) -> Output {
+fn run_with_input_json(args: &[&str], configure: impl FnOnce(&mut Command)) -> Output {
     let fixture = fixture_path("mixed_outputs.json");
-    let fake_bin_dir = setup_fake_wlr_randr();
-    let original_path = env::var("PATH").unwrap_or_default();
 
     let mut command = binary_command();
     command.args(args);
-    command.env("WLR_RANDR_BEHAVIOR", behavior);
-    command.env("WLR_RANDR_FIXTURE", fixture);
-    command.env(
-        "PATH",
-        format!("{}:{original_path}", fake_bin_dir.path().display()),
-    );
+    command.arg("--input-json");
+    command.arg(fixture);
     configure(&mut command);
     command.output().unwrap()
 }
@@ -89,7 +43,7 @@ fn cli_default_mode_updates_existing_profile_in_default_config_path() {
     )
     .unwrap();
 
-    let output = run_with_fake_wlr_randr(&["docked"], "ok", |command| {
+    let output = run_with_input_json(&["docked"], |command| {
         command.env("XDG_CONFIG_HOME", xdg_config_home.path());
     });
 
@@ -112,9 +66,8 @@ fn cli_config_flag_updates_given_file_path() {
     )
     .unwrap();
 
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &["docked", "--config", config_path.to_str().unwrap()],
-        "ok",
         |_| {},
     );
 
@@ -129,9 +82,8 @@ fn cli_appends_profile_if_missing() {
     let config_path = temp.path().join("config");
     fs::write(&config_path, "profile alpha {\n  output \"x\" disable\n}\n").unwrap();
 
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &["docked", "--config", config_path.to_str().unwrap()],
-        "ok",
         |_| {},
     );
 
@@ -148,9 +100,8 @@ fn cli_fails_and_keeps_file_unchanged_for_duplicate_profiles() {
     let initial = "profile docked {\n}\n\nprofile docked {\n}\n";
     fs::write(&config_path, initial).unwrap();
 
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &["docked", "--config", config_path.to_str().unwrap()],
-        "ok",
         |_| {},
     );
 
@@ -168,7 +119,7 @@ fn cli_stdout_mode_prints_profile_and_does_not_edit_config() {
     let initial = "profile docked {\n  output \"old\" disable\n}\n";
     fs::write(&config_path, initial).unwrap();
 
-    let output = run_with_fake_wlr_randr(&["docked", "--stdout"], "ok", |command| {
+    let output = run_with_input_json(&["docked", "--stdout"], |command| {
         command.env("XDG_CONFIG_HOME", xdg_config_home.path());
     });
 
@@ -187,9 +138,8 @@ fn cli_output_mode_writes_raw_profile_without_parsing_config() {
     fs::create_dir_all(broken_config.parent().unwrap()).unwrap();
     fs::write(&broken_config, "profile broken {\n  output \"x\" disable\n").unwrap();
 
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &["docked", "--output", out_path.to_str().unwrap()],
-        "ok",
         |command| {
             command.env("XDG_CONFIG_HOME", xdg_config_home.path());
         },
@@ -205,7 +155,7 @@ fn cli_output_mode_writes_raw_profile_without_parsing_config() {
 
 #[test]
 fn cli_rejects_stdout_and_output_together() {
-    let output = run_with_fake_wlr_randr(&["docked", "--stdout", "--output", "x"], "ok", |_| {});
+    let output = run_with_input_json(&["docked", "--stdout", "--output", "x"], |_| {});
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("cannot be used with"));
@@ -215,14 +165,13 @@ fn cli_rejects_stdout_and_output_together() {
 fn cli_rejects_config_with_stdout() {
     let temp = TempDir::new().unwrap();
     let config_path = temp.path().join("config");
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &[
             "docked",
             "--stdout",
             "--config",
             config_path.to_str().unwrap(),
         ],
-        "ok",
         |_| {},
     );
     assert!(!output.status.success());
@@ -234,7 +183,7 @@ fn cli_rejects_config_with_stdout() {
 fn cli_rejects_config_with_output() {
     let temp = TempDir::new().unwrap();
     let config_path = temp.path().join("config");
-    let output = run_with_fake_wlr_randr(
+    let output = run_with_input_json(
         &[
             "docked",
             "--output",
@@ -242,7 +191,6 @@ fn cli_rejects_config_with_output() {
             "--config",
             config_path.to_str().unwrap(),
         ],
-        "ok",
         |_| {},
     );
     assert!(!output.status.success());
@@ -251,28 +199,65 @@ fn cli_rejects_config_with_output() {
 }
 
 #[test]
-fn cli_surfaces_wlr_randr_stderr_on_failure() {
-    let output = run_with_fake_wlr_randr(&["docked", "--stdout"], "fail", |_| {});
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("failed to collect data from wlr-randr"));
-    assert!(stderr.contains("failed to connect to display"));
-}
-
-#[test]
 fn cli_errors_for_invalid_json() {
-    let output = run_with_fake_wlr_randr(&["docked", "--stdout"], "invalid", |_| {});
+    let temp = TempDir::new().unwrap();
+    let invalid_path = temp.path().join("invalid.json");
+    fs::write(&invalid_path, "{invalid json").unwrap();
+
+    let mut command = binary_command();
+    let output = command
+        .args([
+            "docked",
+            "--stdout",
+            "--input-json",
+            invalid_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("failed to parse wlr-randr output JSON"));
+    assert!(stderr.contains("failed to parse input output JSON"));
 }
 
 #[test]
-fn cli_errors_for_empty_stdout() {
-    let output = run_with_fake_wlr_randr(&["docked", "--stdout"], "empty", |_| {});
+fn cli_errors_for_empty_json() {
+    let temp = TempDir::new().unwrap();
+    let empty_path = temp.path().join("empty.json");
+    fs::write(&empty_path, "").unwrap();
+
+    let mut command = binary_command();
+    let output = command
+        .args([
+            "docked",
+            "--stdout",
+            "--input-json",
+            empty_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("returned empty stdout"));
+    assert!(stderr.contains("failed to parse input output JSON"));
+}
+
+#[test]
+fn cli_live_mode_reports_wayland_connect_error() {
+    let runtime = TempDir::new().unwrap();
+
+    let mut command = binary_command();
+    let output = command
+        .args(["docked", "--stdout"])
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("WAYLAND_DISPLAY", "wayland-not-existing")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("failed to collect output state from Wayland protocol"));
+    assert!(stderr.contains("failed to connect to Wayland compositor"));
 }
 
 #[cfg(unix)]
@@ -291,11 +276,7 @@ fn cli_updates_symlink_target_without_replacing_symlink() {
     let link_path = temp.path().join("config-link");
     symlink(&target_path, &link_path).unwrap();
 
-    let output = run_with_fake_wlr_randr(
-        &["docked", "--config", link_path.to_str().unwrap()],
-        "ok",
-        |_| {},
-    );
+    let output = run_with_input_json(&["docked", "--config", link_path.to_str().unwrap()], |_| {});
 
     assert!(output.status.success());
     assert!(
