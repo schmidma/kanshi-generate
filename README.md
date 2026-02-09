@@ -7,10 +7,19 @@ A small CLI tool that converts the output of [`wlr-randr`](https://gitlab.freede
 ## Usage
 
 ```bash
-kanshi-generate <profile-name> >> ~/.config/kanshi/config
+kanshi-generate <profile-name>
 ```
 
-This will create a kanshi profile named `<profile-name>` using the currently connected Wayland outputs.
+By default this updates your kanshi config in-place:
+
+- Replaces profile `<profile-name>` if it exists exactly once.
+- Appends profile `<profile-name>` if it does not exist yet.
+- Fails without writing if duplicate profile blocks with the same name exist.
+
+Default config path:
+
+- `$XDG_CONFIG_HOME/kanshi/config` (if `XDG_CONFIG_HOME` is set)
+- otherwise `$HOME/.config/kanshi/config`
 
 ### Options
 
@@ -21,8 +30,10 @@ Arguments:
   <NAME>  Profile name
 
 Options:
+      --config <PATH>      Override kanshi config path for in-place profile upsert
+      --stdout             Print generated profile to stdout (raw mode, no config parsing/upsert)
       --input-json <PATH>  Read JSON from a file path or '-' for stdin instead of calling wlr-randr
-      --output <PATH>      Write output to a file path or '-' for stdout
+      --output <PATH>      Write generated profile to file (raw mode, no config parsing/upsert)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -33,6 +44,12 @@ Examples:
 # Use live compositor state (default behavior)
 kanshi-generate docked
 
+# Override config path for in-place overwrite/append
+kanshi-generate docked --config ~/.config/kanshi/config
+
+# Print generated profile only (no config edit)
+kanshi-generate docked --stdout
+
 # Use previously captured JSON
 wlr-randr --json > outputs.json
 kanshi-generate docked --input-json outputs.json
@@ -40,7 +57,7 @@ kanshi-generate docked --input-json outputs.json
 # Pipe JSON over stdin
 wlr-randr --json | kanshi-generate docked --input-json -
 
-# Write directly to a file (overwrites target file)
+# Write generated profile directly to a file (no config parse/merge)
 kanshi-generate docked --output ~/.config/kanshi/generated-profile.conf
 ```
 
@@ -55,6 +72,7 @@ cargo install --git https://github.com/schmidma/kanshi-generate --locked
 - If `wlr-randr` cannot reach your compositor, the command now exits with the original stderr from `wlr-randr`.
 - If a monitor is enabled but missing mode/position/scale data, the command fails fast with an explicit output-specific error.
 - Disabled outputs may not include `position`/`scale` in JSON; this is handled automatically.
+- If your config contains duplicate profile names, the command fails to avoid ambiguous overwrites.
 
 ## Development
 
