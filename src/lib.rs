@@ -12,7 +12,7 @@ use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle,
     backend::ObjectId,
     globals::{BindError, GlobalListContents, registry_queue_init},
-    protocol::{wl_callback, wl_registry},
+    protocol::{wl_callback, wl_output, wl_registry},
 };
 use wayland_protocols_wlr::output_management::v1::client::{
     zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
@@ -83,6 +83,7 @@ pub struct OutputSnapshot {
     modes: Vec<ModeSnapshot>,
     position: Option<PositionSnapshot>,
     scale: Option<f64>,
+    transform: Option<String>,
 }
 
 impl OutputSnapshot {
@@ -112,6 +113,10 @@ impl OutputSnapshot {
             .iter()
             .find(|mode| mode.current)
             .or_else(|| self.modes.iter().find(|mode| mode.preferred))
+    }
+
+    fn normalized_transform(&self) -> Option<&'static str> {
+        normalize_transform_str(self.transform.as_deref()?)
     }
 }
 
@@ -155,6 +160,7 @@ struct WaylandHeadState {
     current_mode: Option<ObjectId>,
     position: Option<PositionSnapshot>,
     scale: Option<f64>,
+    transform: Option<String>,
     mode_ids: Vec<ObjectId>,
 }
 
@@ -260,6 +266,9 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for WaylandState {
             }
             zwlr_output_head_v1::Event::Scale { scale } => {
                 head_state.scale = Some(scale);
+            }
+            zwlr_output_head_v1::Event::Transform { transform } => {
+                head_state.transform = transform_from_wayland(transform);
             }
             zwlr_output_head_v1::Event::Finished => {
                 state.heads.remove(&head.id());
@@ -530,6 +539,7 @@ fn build_output_snapshots(state: &WaylandState) -> Result<Vec<OutputSnapshot>, G
             modes,
             position: head_state.position.clone(),
             scale: head_state.scale,
+            transform: head_state.transform.clone(),
         };
 
         outputs.push(output);
@@ -874,12 +884,21 @@ fn render_profile(profile_name: &str, outputs: &[OutputSnapshot]) -> Result<Stri
             let scale = output.scale.ok_or_else(|| GenerateError::MissingScale {
                 output: output.name.clone(),
             })?;
-            writeln!(
-                &mut profile,
-                "  output \"{output_id}\" mode {}x{}@{:.2}Hz position {},{} scale {:.2}",
-                mode.width, mode.height, mode.refresh, position.x, position.y, scale
-            )
-            .map_err(|_| GenerateError::Format)?;
+            if let Some(transform) = output.normalized_transform() {
+                writeln!(
+                    &mut profile,
+                    "  output \"{output_id}\" mode {}x{}@{:.2}Hz position {},{} scale {:.2} transform {transform}",
+                    mode.width, mode.height, mode.refresh, position.x, position.y, scale
+                )
+                .map_err(|_| GenerateError::Format)?;
+            } else {
+                writeln!(
+                    &mut profile,
+                    "  output \"{output_id}\" mode {}x{}@{:.2}Hz position {},{} scale {:.2}",
+                    mode.width, mode.height, mode.refresh, position.x, position.y, scale
+                )
+                .map_err(|_| GenerateError::Format)?;
+            }
         } else {
             writeln!(&mut profile, "  output \"{output_id}\" disable")
                 .map_err(|_| GenerateError::Format)?;
@@ -902,14 +921,93 @@ fn escape_kanshi_quoted(raw: &str) -> String {
     escaped
 }
 
+fn transform_from_wayland(
+    transform: wayland_client::WEnum<wl_output::Transform>,
+) -> Option<String> {
+    match transform {
+        wayland_client::WEnum::Value(wl_output::Transform::Normal) => Some(String::from("normal")),
+        wayland_client::WEnum::Value(wl_output::Transform::_90) => Some(String::from("90")),
+        wayland_client::WEnum::Value(wl_output::Transform::_180) => Some(String::from("180")),
+        wayland_client::WEnum::Value(wl_output::Transform::_270) => Some(String::from("270")),
+        wayland_client::WEnum::Value(wl_output::Transform::Flipped) => {
+            Some(String::from("flipped"))
+        }
+        wayland_client::WEnum::Value(wl_output::Transform::Flipped90) => {
+            Some(String::from("flipped-90"))
+        }
+        wayland_client::WEnum::Value(wl_output::Transform::Flipped180) => {
+            Some(String::from("flipped-180"))
+        }
+        wayland_client::WEnum::Value(wl_output::Transform::Flipped270) => {
+            Some(String::from("flipped-270"))
+        }
+        wayland_client::WEnum::Value(_) => None,
+        wayland_client::WEnum::Unknown(raw) => normalize_transform_u32(raw).map(String::from),
+    }
+}
+
+fn normalize_transform_u32(raw: u32) -> Option<&'static str> {
+    match raw {
+        0 => Some("normal"),
+        1 => Some("90"),
+        2 => Some("180"),
+        3 => Some("270"),
+        4 => Some("flipped"),
+        5 => Some("flipped-90"),
+        6 => Some("flipped-180"),
+        7 => Some("flipped-270"),
+        _ => None,
+    }
+}
+
+fn normalize_transform_str(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some("normal"),
+        "90" => Some("90"),
+        "180" => Some("180"),
+        "270" => Some("270"),
+        "flipped" => Some("flipped"),
+        "flipped-90" => Some("flipped-90"),
+        "flipped-180" => Some("flipped-180"),
+        "flipped-270" => Some("flipped-270"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        path::Path,
+        sync::{Mutex, OnceLock},
+    };
 
     use super::{
         GenerateError, collect_outputs_from_json, generate_profile_from_slice,
         resolve_default_kanshi_config_path, upsert_profile_in_config,
     };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_locked_env<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().expect("env mutex poisoned");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_home = std::env::var_os("HOME");
+        let result = f();
+        unsafe {
+            match old_xdg {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        result
+    }
 
     #[test]
     fn renders_fixture_with_enabled_and_disabled_outputs() {
@@ -1027,30 +1125,76 @@ mod tests {
     }
 
     #[test]
-    fn resolve_default_config_uses_xdg_config_home() {
-        let temp = tempfile::TempDir::new().unwrap();
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", temp.path());
-            std::env::remove_var("HOME");
-        }
+    fn includes_transform_for_rotated_enabled_output() {
+        let json = r#"[
+          {
+            "name":"DP-7",
+            "make":"Dell Inc.",
+            "model":"DELL U2422H",
+            "serial":"75BNF83",
+            "enabled":true,
+            "modes":[
+              {"width":1920,"height":1080,"refresh":60.0,"preferred":true,"current":true}
+            ],
+            "position":{"x":0,"y":0},
+            "scale":1.0,
+            "transform":"90"
+          }
+        ]"#;
+        let rendered = generate_profile_from_slice("rotated", json.as_bytes()).unwrap();
+        assert!(rendered.contains("transform 90"));
+    }
 
-        let path = resolve_default_kanshi_config_path().unwrap();
-        assert_eq!(path, temp.path().join("kanshi").join("config"));
+    #[test]
+    fn includes_transform_for_normal_orientation() {
+        let json = r#"[
+          {
+            "name":"DP-1",
+            "make":"Dell",
+            "model":"U2723",
+            "serial":"ABC123",
+            "enabled":true,
+            "modes":[
+              {"width":1920,"height":1080,"refresh":60.0,"preferred":true,"current":true}
+            ],
+            "position":{"x":0,"y":0},
+            "scale":1.0,
+            "transform":"normal"
+          }
+        ]"#;
+        let rendered = generate_profile_from_slice("desk", json.as_bytes()).unwrap();
+        assert!(rendered.contains("transform normal"));
+    }
+
+    #[test]
+    fn resolve_default_config_uses_xdg_config_home() {
+        with_locked_env(|| {
+            let temp = tempfile::TempDir::new().unwrap();
+            unsafe {
+                std::env::set_var("XDG_CONFIG_HOME", temp.path());
+                std::env::remove_var("HOME");
+            }
+
+            let path = resolve_default_kanshi_config_path().unwrap();
+            assert_eq!(path, temp.path().join("kanshi").join("config"));
+        });
     }
 
     #[test]
     fn resolve_default_config_falls_back_to_home() {
-        let temp = tempfile::TempDir::new().unwrap();
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::set_var("HOME", temp.path());
-        }
+        with_locked_env(|| {
+            let temp = tempfile::TempDir::new().unwrap();
+            unsafe {
+                std::env::remove_var("XDG_CONFIG_HOME");
+                std::env::set_var("HOME", temp.path());
+            }
 
-        let path = resolve_default_kanshi_config_path().unwrap();
-        assert_eq!(
-            path,
-            temp.path().join(".config").join("kanshi").join("config")
-        );
+            let path = resolve_default_kanshi_config_path().unwrap();
+            assert_eq!(
+                path,
+                temp.path().join(".config").join("kanshi").join("config")
+            );
+        });
     }
 
     #[test]
@@ -1126,16 +1270,18 @@ mod tests {
 
     #[test]
     fn resolve_default_config_requires_home_or_xdg() {
-        unsafe {
-            std::env::remove_var("XDG_CONFIG_HOME");
-            std::env::remove_var("HOME");
-        }
-        let err = resolve_default_kanshi_config_path().unwrap_err();
-        assert!(matches!(err, GenerateError::ConfigPathUnavailable));
+        with_locked_env(|| {
+            unsafe {
+                std::env::remove_var("XDG_CONFIG_HOME");
+                std::env::remove_var("HOME");
+            }
+            let err = resolve_default_kanshi_config_path().unwrap_err();
+            assert!(matches!(err, GenerateError::ConfigPathUnavailable));
 
-        let fallback = Path::new("/tmp");
-        unsafe {
-            std::env::set_var("HOME", fallback);
-        }
+            let fallback = Path::new("/tmp");
+            unsafe {
+                std::env::set_var("HOME", fallback);
+            }
+        });
     }
 }
