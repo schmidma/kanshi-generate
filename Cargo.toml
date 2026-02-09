@@ -2,6 +2,7 @@
 name = "kanshi-generate"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Maximilian Schmidt <maximilian@schmidt.so>"]
 description = "A small CLI tool that converts `wlr-randr` output into kanshi profile configuration."
 readme = "README.md"
@@ -17,3 +18,7 @@ clap = { version = "4.5.49", features = ["derive"] }
 color-eyre = "0.6.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+thiserror = "2.0.17"
+
+[dev-dependencies]
+tempfile = "3.23.0"

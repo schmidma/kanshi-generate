@@ -1,111 +1,63 @@
-#![warn(clippy::pedantic)]
 use std::{
-    fmt::{self, Write as _},
-    process::Command,
+    fs,
+    io::{self, Read as _},
 };
 
 use clap::Parser;
-use color_eyre::{
-    Result,
-    eyre::{Context, ContextCompat as _},
-};
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize)]
-struct WlrStatus(Vec<Output>);
-
-impl WlrStatus {
-    fn to_kanshi(&self, name: &str) -> Result<String> {
-        let mut result = String::new();
-        writeln!(&mut result, "profile {name} {{")?;
-        for output in &self.0 {
-            output
-                .to_kanshi(&mut result)
-                .wrap_err_with(|| format!("failed to convert output {} to kanshi", output.name))?;
-        }
-        result.push_str("}\n");
-        Ok(result)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Output {
-    name: String,
-    make: String,
-    model: String,
-    serial: Option<String>,
-    enabled: bool,
-    modes: Vec<Mode>,
-    position: Position,
-    scale: f32,
-}
-
-impl Output {
-    fn to_kanshi(&self, mut writer: impl fmt::Write) -> Result<()> {
-        if self.enabled {
-            let active_mode = self
-                .modes
-                .iter()
-                .find(|mode| mode.current)
-                .or_else(|| self.modes.iter().find(|mode| mode.preferred))
-                .wrap_err_with(|| {
-                    format!("no active or preferred mode found for output {}", self.name)
-                })?;
-            writeln!(
-                writer,
-                "  output \"{make} {model} {serial}\" mode {width}x{height}@{refresh:.2}Hz position {x},{y} scale {scale:.2}",
-                make = self.make,
-                model = self.model,
-                serial = self.serial.as_deref().unwrap_or("Unknown"),
-                width = active_mode.width,
-                height = active_mode.height,
-                refresh = active_mode.refresh,
-                x = self.position.x,
-                y = self.position.y,
-                scale = self.scale
-            )?;
-        } else {
-            writeln!(writer, "output {} disable", self.name)?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Mode {
-    width: u32,
-    height: u32,
-    refresh: f32,
-    preferred: bool,
-    current: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct Position {
-    x: u32,
-    y: u32,
-}
+use color_eyre::{Result, eyre::Context as _};
+use kanshi_generate::{capture_wlr_randr_json, generate_profile_from_slice};
 
 #[derive(Debug, Parser)]
+#[command(
+    about = "Generate a kanshi profile from wlr-randr output",
+    version,
+    author
+)]
 struct Arguments {
     /// Profile name
     name: String,
+    /// Read JSON from a file path or '-' for stdin instead of calling wlr-randr
+    #[arg(long, value_name = "PATH")]
+    input_json: Option<String>,
+    /// Write output to a file path or '-' for stdout
+    #[arg(long, value_name = "PATH")]
+    output: Option<String>,
+}
+
+fn read_input(input_json: Option<&str>) -> Result<Vec<u8>> {
+    match input_json {
+        Some("-") => {
+            let mut input = Vec::new();
+            io::stdin()
+                .read_to_end(&mut input)
+                .wrap_err("failed to read JSON from stdin")?;
+            Ok(input)
+        }
+        Some(path) => {
+            fs::read(path).wrap_err_with(|| format!("failed to read input JSON from `{path}`"))
+        }
+        None => capture_wlr_randr_json().wrap_err("failed to collect data from wlr-randr"),
+    }
+}
+
+fn write_output(kanshi: &str, output: Option<&str>) -> Result<()> {
+    match output {
+        Some("-") | None => {
+            print!("{kanshi}");
+            Ok(())
+        }
+        Some(path) => fs::write(path, kanshi)
+            .wrap_err_with(|| format!("failed to write generated profile to `{path}`")),
+    }
 }
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
     let args = Arguments::parse();
-
-    let mut command = Command::new("wlr-randr");
-    command.arg("--json");
-    let output = command.output().wrap_err("failed to execute wlr-randr")?;
-    let status: WlrStatus =
-        serde_json::from_slice(&output.stdout).wrap_err("failed to parse wlr-randr output")?;
-
-    let kanshi = status
-        .to_kanshi(&args.name)
-        .wrap_err("failed to convert to kanshi")?;
-    println!("{kanshi}");
+    let wlr_randr_json = read_input(args.input_json.as_deref())?;
+    let kanshi = generate_profile_from_slice(&args.name, &wlr_randr_json)
+        .wrap_err("failed to generate kanshi profile")?;
+    write_output(&kanshi, args.output.as_deref())?;
     Ok(())
 }

@@ -1,0 +1,60 @@
+[
+  {
+    "name": "eDP-1",
+    "make": "AU Optronics",
+    "model": "0xD291",
+    "serial": null,
+    "enabled": false,
+    "modes": [
+      {
+        "width": 1920,
+        "height": 1200,
+        "refresh": 60.026001,
+        "preferred": true,
+        "current": false
+      }
+    ]
+  },
+  {
+    "name": "DP-1",
+    "make": "Dell Inc.",
+    "model": "DELL U2422H",
+    "serial": "75BNF83",
+    "enabled": true,
+    "modes": [
+      {
+        "width": 1920,
+        "height": 1080,
+        "refresh": 60.0,
+        "preferred": true,
+        "current": true
+      }
+    ],
+    "position": {
+      "x": 0,
+      "y": 0
+    },
+    "scale": 1.0
+  },
+  {
+    "name": "DP-2",
+    "make": "Dell Inc.",
+    "model": "DELL P2723D",
+    "serial": "2ZZ6714",
+    "enabled": true,
+    "modes": [
+      {
+        "width": 2560,
+        "height": 1440,
+        "refresh": 59.951,
+        "preferred": true,
+        "current": false
+      }
+    ],
+    "position": {
+      "x": -2560,
+      "y": 300
+    },
+    "scale": 1.25
+  }
+]
