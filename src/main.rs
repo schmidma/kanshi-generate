@@ -7,8 +7,9 @@ use std::{
 use clap::Parser;
 use color_eyre::{Result, eyre::Context as _};
 use kanshi_generate::{
-    collect_outputs_wayland, generate_profile_from_outputs, generate_profile_from_slice,
-    resolve_default_kanshi_config_path, upsert_profile_in_file,
+    UpsertOutcome, collect_outputs_wayland, generate_profile_from_outputs,
+    generate_profile_from_slice, resolve_default_kanshi_config_path,
+    upsert_profile_in_file_with_outcome,
 };
 
 #[derive(Debug, Parser)]
@@ -80,6 +81,13 @@ fn main() -> Result<()> {
 
     if args.stdout || args.output.is_some() {
         write_raw_output(&kanshi, args.output.as_ref())?;
+        if let Some(output_path) = args.output.as_ref() {
+            eprintln!(
+                "wrote generated profile `{}` to `{}`",
+                args.name,
+                output_path.display()
+            );
+        }
         return Ok(());
     }
 
@@ -88,11 +96,22 @@ fn main() -> Result<()> {
         None => resolve_default_kanshi_config_path()
             .wrap_err("failed to resolve default kanshi config path")?,
     };
-    upsert_profile_in_file(&config_path, &args.name, &kanshi).wrap_err_with(|| {
-        format!(
-            "failed to update kanshi config at `{}`",
-            config_path.display()
-        )
-    })?;
+    let outcome = upsert_profile_in_file_with_outcome(&config_path, &args.name, &kanshi)
+        .wrap_err_with(|| {
+            format!(
+                "failed to update kanshi config at `{}`",
+                config_path.display()
+            )
+        })?;
+    let action = match outcome {
+        UpsertOutcome::ReplacedExisting => "replaced existing profile",
+        UpsertOutcome::AppendedNew => "appended new profile",
+    };
+    eprintln!(
+        "updated kanshi config `{}`: {} `{}`",
+        config_path.display(),
+        action,
+        args.name
+    );
     Ok(())
 }

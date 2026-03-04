@@ -49,6 +49,9 @@ fn cli_default_mode_updates_existing_profile_in_default_config_path() {
 
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("updated kanshi config"));
+    assert!(stderr.contains("replaced existing profile `docked`"));
 
     let updated = fs::read_to_string(config_path).unwrap();
     assert!(updated.contains(&expected_output()));
@@ -72,6 +75,9 @@ fn cli_config_flag_updates_given_file_path() {
     );
 
     assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("updated kanshi config"));
+    assert!(stderr.contains("replaced existing profile `docked`"));
     let updated = fs::read_to_string(config_path).unwrap();
     assert_eq!(updated, expected_output());
 }
@@ -88,6 +94,9 @@ fn cli_appends_profile_if_missing() {
     );
 
     assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("updated kanshi config"));
+    assert!(stderr.contains("appended new profile `docked`"));
     let updated = fs::read_to_string(config_path).unwrap();
     assert!(updated.contains("profile alpha"));
     assert!(updated.ends_with(&expected_output()));
@@ -125,6 +134,7 @@ fn cli_stdout_mode_prints_profile_and_does_not_edit_config() {
 
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected_output());
+    assert!(output.stderr.is_empty());
     assert_eq!(fs::read_to_string(config_path).unwrap(), initial);
 }
 
@@ -146,6 +156,9 @@ fn cli_output_mode_writes_raw_profile_without_parsing_config() {
     );
 
     assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("wrote generated profile `docked`"));
+    assert!(stderr.contains(out_path.to_str().unwrap()));
     assert_eq!(fs::read_to_string(out_path).unwrap(), expected_output());
     assert_eq!(
         fs::read_to_string(broken_config).unwrap(),

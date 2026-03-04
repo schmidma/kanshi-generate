@@ -22,6 +22,12 @@ use wayland_protocols_wlr::output_management::v1::client::{
 
 const PROFILE_KEYWORD: &[u8] = b"profile";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    ReplacedExisting,
+    AppendedNew,
+}
+
 #[derive(Debug, Error)]
 pub enum GenerateError {
     #[error("failed to parse input output JSON")]
@@ -397,6 +403,16 @@ pub fn upsert_profile_in_config(
     profile_name: &str,
     new_profile_block: &str,
 ) -> Result<String, GenerateError> {
+    let (merged, _) =
+        upsert_profile_in_config_with_outcome(config, profile_name, new_profile_block)?;
+    Ok(merged)
+}
+
+fn upsert_profile_in_config_with_outcome(
+    config: &str,
+    profile_name: &str,
+    new_profile_block: &str,
+) -> Result<(String, UpsertOutcome), GenerateError> {
     if profile_name.trim().is_empty() {
         return Err(GenerateError::EmptyProfileName);
     }
@@ -419,8 +435,11 @@ pub fn upsert_profile_in_config(
         canonical_block.push('\n');
     }
 
-    let mut merged = if matches.is_empty() {
-        append_profile(config, &canonical_block)
+    let (mut merged, outcome) = if matches.is_empty() {
+        (
+            append_profile(config, &canonical_block),
+            UpsertOutcome::AppendedNew,
+        )
     } else {
         let target = matches.remove(0);
         let suffix = &config[target.end..];
@@ -435,21 +454,21 @@ pub fn upsert_profile_in_config(
         out.push_str(&config[..target.start]);
         out.push_str(replacement);
         out.push_str(suffix);
-        out
+        (out, UpsertOutcome::ReplacedExisting)
     };
 
     if !merged.ends_with('\n') {
         merged.push('\n');
     }
 
-    Ok(merged)
+    Ok((merged, outcome))
 }
 
-pub fn upsert_profile_in_file(
+pub fn upsert_profile_in_file_with_outcome(
     config_path: &Path,
     profile_name: &str,
     new_profile_block: &str,
-) -> Result<(), GenerateError> {
+) -> Result<UpsertOutcome, GenerateError> {
     let target_path = if config_path.exists() {
         fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf())
     } else {
@@ -467,8 +486,18 @@ pub fn upsert_profile_in_file(
         }
     };
 
-    let merged = upsert_profile_in_config(&existing, profile_name, new_profile_block)?;
-    write_atomic(&target_path, &merged)
+    let (merged, outcome) =
+        upsert_profile_in_config_with_outcome(&existing, profile_name, new_profile_block)?;
+    write_atomic(&target_path, &merged)?;
+    Ok(outcome)
+}
+
+pub fn upsert_profile_in_file(
+    config_path: &Path,
+    profile_name: &str,
+    new_profile_block: &str,
+) -> Result<(), GenerateError> {
+    upsert_profile_in_file_with_outcome(config_path, profile_name, new_profile_block).map(|_| ())
 }
 
 fn map_bind_error(error: BindError) -> GenerateError {
@@ -977,13 +1006,15 @@ fn normalize_transform_str(raw: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         path::Path,
         sync::{Mutex, OnceLock},
     };
 
     use super::{
-        GenerateError, collect_outputs_from_json, generate_profile_from_slice,
+        GenerateError, UpsertOutcome, collect_outputs_from_json, generate_profile_from_slice,
         resolve_default_kanshi_config_path, upsert_profile_in_config,
+        upsert_profile_in_file_with_outcome,
     };
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1219,6 +1250,41 @@ mod tests {
         assert!(merged.starts_with("profile alpha"));
         assert!(merged.contains("\n\nprofile beta"));
         assert!(merged.ends_with('\n'));
+    }
+
+    #[test]
+    fn upsert_file_outcome_replaced_existing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_path = temp.path().join("config");
+        fs::write(
+            &config_path,
+            "profile desk {\n  output \"old\" disable\n}\n\nprofile other {\n}\n",
+        )
+        .unwrap();
+
+        let replacement = "profile desk {\n  output \"new\" disable\n}\n";
+        let outcome =
+            upsert_profile_in_file_with_outcome(&config_path, "desk", replacement).unwrap();
+
+        assert_eq!(outcome, UpsertOutcome::ReplacedExisting);
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains("output \"new\" disable"));
+        assert!(!updated.contains("output \"old\" disable"));
+    }
+
+    #[test]
+    fn upsert_file_outcome_appended_new() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config_path = temp.path().join("config");
+        fs::write(&config_path, "profile alpha {\n  output \"x\" disable\n}\n").unwrap();
+
+        let inserted = "profile desk {\n  output \"new\" disable\n}\n";
+        let outcome = upsert_profile_in_file_with_outcome(&config_path, "desk", inserted).unwrap();
+
+        assert_eq!(outcome, UpsertOutcome::AppendedNew);
+        let updated = fs::read_to_string(config_path).unwrap();
+        assert!(updated.contains("profile alpha"));
+        assert!(updated.contains("profile desk"));
     }
 
     #[test]
